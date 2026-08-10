@@ -1,8 +1,103 @@
 import numpy as np
-import torch
 from openpi_client.base_policy import BasePolicy
 from openpi_client.image_tools import resize_with_pad
+import torch
+
 from openpi.configs.robots import ROBOT_REGISTRY
+
+
+def metric_depth_to_uint8(
+    depth: np.ndarray,
+    *,
+    raw_percentiles: tuple[float, float] = (1.0, 99.0),
+    inverse_clip: tuple[float, float] = (1.0, 100.0),
+    metric_bounds: tuple[float, float] | None = None,
+    eps: float = 1e-3,
+) -> np.ndarray:
+    """Map one metric-depth frame to the grayscale representation used for training.
+
+    Training normalizes over a whole video. At live inference time there are no
+    future frames, so the default uses the same percentiles on the current frame.
+    Supplying ``metric_bounds`` disables the per-frame percentile estimate and
+    gives a temporally stable transform.
+    """
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.ndim == 3 and depth.shape[-1] in {1, 3, 4}:
+        depth = depth[..., 0]
+    if depth.ndim != 2:
+        raise ValueError(f"Expected one depth frame shaped (H, W) or (H, W, C), got {depth.shape}")
+
+    pct_lo, pct_hi = raw_percentiles
+    inv_lo, inv_hi = inverse_clip
+    if not 0.0 <= pct_lo < pct_hi <= 100.0:
+        raise ValueError(f"Invalid raw depth percentiles: {raw_percentiles}")
+    if inv_lo <= 0.0 or inv_hi <= inv_lo:
+        raise ValueError(f"Invalid inverse-depth clipping range: {inverse_clip}")
+    if metric_bounds is not None and not 0.0 <= metric_bounds[0] < metric_bounds[1]:
+        raise ValueError(f"Invalid metric depth bounds: {metric_bounds}")
+    if eps <= 0.0:
+        raise ValueError(f"eps must be positive, got {eps}")
+
+    valid = np.isfinite(depth) & (depth > 0.0)
+    gray = np.zeros(depth.shape, dtype=np.uint8)
+    if not valid.any():
+        return gray
+
+    if metric_bounds is None:
+        raw_lo, raw_hi = np.percentile(depth[valid], [pct_lo, pct_hi])
+    else:
+        raw_lo, raw_hi = metric_bounds
+    raw_lo, raw_hi = float(raw_lo), float(raw_hi)
+    if not np.isfinite(raw_lo) or not np.isfinite(raw_hi) or raw_hi <= raw_lo:
+        return gray
+
+    normalized = np.zeros_like(depth, dtype=np.float32)
+    normalized[valid] = (np.clip(depth[valid], raw_lo, raw_hi) - raw_lo) / (raw_hi - raw_lo)
+
+    inverse = np.zeros_like(depth, dtype=np.float32)
+    inverse[valid] = np.clip(1.0 / (normalized[valid] + eps), inv_lo, inv_hi)
+    log_lo, log_hi = np.log(inv_lo), np.log(inv_hi)
+    scaled = np.zeros_like(depth, dtype=np.float32)
+    scaled[valid] = (np.log(inverse[valid]) - log_lo) / (log_hi - log_lo)
+    gray[valid] = (np.clip(scaled[valid], 0.0, 1.0) * 255.0).astype(np.uint8)
+    return gray
+
+
+def _depth_image_batch(
+    camera_obs: np.ndarray,
+    *,
+    batch_size: int,
+    metric_bounds: tuple[float, float] | None,
+    raw_percentiles: tuple[float, float],
+    inverse_clip: tuple[float, float],
+) -> np.ndarray:
+    """Return depth observations as a uint8 ``(B, H, W, 3)`` batch."""
+    camera_obs = np.asarray(camera_obs)
+    if camera_obs.ndim == 2 or (camera_obs.ndim == 3 and camera_obs.shape[-1] in {1, 3, 4}):
+        camera_obs = camera_obs[None, ...]
+    elif camera_obs.ndim not in {3, 4}:
+        raise ValueError(f"Unsupported depth observation shape: {camera_obs.shape}")
+
+    if camera_obs.shape[0] != batch_size:
+        raise ValueError(
+            f"Depth observation batch {camera_obs.shape[0]} does not match proprio batch {batch_size}"
+        )
+
+    frames = []
+    for frame in camera_obs:
+        # Video-decoded or client-preprocessed depth is already in the trained
+        # uint8 image domain. Metric depth is floating point and needs mapping.
+        if frame.dtype == np.uint8:
+            gray = frame[..., 0] if frame.ndim == 3 else frame
+        else:
+            gray = metric_depth_to_uint8(
+                frame,
+                raw_percentiles=raw_percentiles,
+                inverse_clip=inverse_clip,
+                metric_bounds=metric_bounds,
+            )
+        frames.append(np.repeat(gray[..., None], 3, axis=-1))
+    return np.stack(frames)
 
 
 class B1KPolicyWrapper:
@@ -15,6 +110,9 @@ class B1KPolicyWrapper:
         action_horizon: int,
         max_len: int,
         obs_size: tuple[int, int] = (224, 224),
+        depth_bounds: tuple[float, float] | None = None,
+        depth_percentiles: tuple[float, float] = (1.0, 99.0),
+        depth_inverse_clip: tuple[float, float] = (1.0, 100.0),
     ) -> None:
         # Load robot config from registry
         self.robot = ROBOT_REGISTRY[robot]
@@ -24,6 +122,9 @@ class B1KPolicyWrapper:
         self.action_horizon = action_horizon
         self.obs_size = obs_size
         self.max_len = max_len
+        self.depth_bounds = depth_bounds
+        self.depth_percentiles = depth_percentiles
+        self.depth_inverse_clip = depth_inverse_clip
         self.temporal_ensemble_max = 5  # max number of sequences to ensemble
 
         # Extract gripper indices from robot config (end-effectors to preserve)
@@ -76,9 +177,20 @@ class B1KPolicyWrapper:
         # Process camera images from robot config
         observations = []
         for camera_key in sorted(self.robot.observations.keys()):
-            camera_obs = obs[self.robot.observations[camera_key].obs_key][..., :3]
-            if camera_obs.ndim == 3:
-                camera_obs = camera_obs[None, ...]  # Add batch dimension
+            observation_config = self.robot.observations[camera_key]
+            camera_obs = np.asarray(obs[observation_config.obs_key])
+            if observation_config.modality == "depth":
+                camera_obs = _depth_image_batch(
+                    camera_obs,
+                    batch_size=batch_size,
+                    metric_bounds=self.depth_bounds,
+                    raw_percentiles=self.depth_percentiles,
+                    inverse_clip=self.depth_inverse_clip,
+                )
+            else:
+                camera_obs = camera_obs[..., :3]
+                if camera_obs.ndim == 3:
+                    camera_obs = camera_obs[None, ...]  # Add batch dimension
             observations.append(resize_with_pad(camera_obs, *self.obs_size))
 
         # Pad with zeros if we have fewer than 3 cameras (expected by model)

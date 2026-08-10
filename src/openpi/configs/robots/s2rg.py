@@ -1,5 +1,7 @@
-from .base_config import ObservationConfig, StateActionConfig, RobotConfig, register_robot
-
+from .base_config import ObservationConfig
+from .base_config import RobotConfig
+from .base_config import StateActionConfig
+from .base_config import register_robot
 
 # Franka Robot Configuration
 # Single-arm robot with external and wrist cameras
@@ -39,15 +41,17 @@ SimFrankaDepth = RobotConfig(
     observations={
         "image_0": ObservationConfig(
             name="external_depth",
-            obs_key="external::external_camera_1::depth",
+            obs_key="external::external_camera_1::depth_linear",
             dataset_key="observation.sim.depth.external_1",
-            resolution=[240, 416]
+            resolution=[240, 416],
+            modality="depth",
         ),
         "image_1": ObservationConfig(
             name="wrist_depth",
-            obs_key="robot::robot:camera_link:Camera:0::depth",
+            obs_key="robot::robot:camera_link:Camera:0::depth_linear",
             dataset_key="observation.sim.depth.wrist",
-            resolution=[240, 416]
+            resolution=[240, 416],
+            modality="depth",
         ),
     },
     action_key=SimFranka.action_key,
@@ -137,21 +141,24 @@ SimR1ProDepth = RobotConfig(
     observations={
         "image_0": ObservationConfig(
             name="head_depth",
-            obs_key="external::zed_camera::depth",
+            obs_key="external::zed_camera::depth_linear",
             dataset_key="observation.sim.depth.head",
-            resolution=[240, 416]
+            resolution=[240, 416],
+            modality="depth",
         ),
         "image_1": ObservationConfig(
             name="left_wrist_depth",
-            obs_key="external::left_realsense_camera::depth",
+            obs_key="external::left_realsense_camera::depth_linear",
             dataset_key="observation.sim.depth.left_wrist",
-            resolution=[240, 416]
+            resolution=[240, 416],
+            modality="depth",
         ),
         "image_2": ObservationConfig(
             name="right_wrist_depth",
-            obs_key="external::right_realsense_camera::depth",
+            obs_key="external::right_realsense_camera::depth_linear",
             dataset_key="observation.sim.depth.right_wrist",
-            resolution=[240, 416]
+            resolution=[240, 416],
+            modality="depth",
         ),
     },
     action_key=SimR1Pro.action_key,

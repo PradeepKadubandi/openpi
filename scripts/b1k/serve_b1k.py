@@ -1,6 +1,7 @@
 import dataclasses
 import logging
 import socket
+
 import tyro
 
 from openpi.configs.tasks import TASK_REGISTRY
@@ -30,6 +31,12 @@ class Args:
     # Specifies how to load the policy.
     policy: Checkpoint
 
+    # Normalization asset directory inside the checkpoint. This is independent
+    # of `task`, which only selects the language prompt.
+    asset_id: str | None = None
+    # Alias for `asset_id`, retained for existing launch commands.
+    repo_id: str | None = None
+
     control_mode: str = "receding_horizon"
     # Number of actions to execute before replanning.
     action_horizon: int = 15
@@ -37,6 +44,14 @@ class Args:
     port: int = 8000
     # Record the policy's behavior for debugging.
     record: bool = False
+    # Optional fixed metric-depth bounds. If omitted, each live frame uses its
+    # valid 1st/99th percentiles, the causal analogue of training-time per-video
+    # normalization.
+    depth_bounds: tuple[float, float] | None = None
+    # Percentiles used when fixed metric bounds are not supplied.
+    depth_percentiles: tuple[float, float] = (1.0, 99.0)
+    # Log inverse-depth clipping range used by the depth-video builder.
+    depth_inverse_clip: tuple[float, float] = (1.0, 100.0)
 
 
 def main(args: Args) -> None:
@@ -45,13 +60,23 @@ def main(args: Args) -> None:
     task_prompt = TASK_REGISTRY[task_bucket][task_name]
     # log the prompt used
     logging.info(f"Using robot: {args.robot}, prompt: {task_prompt}")
-    
-    # Load training config and override request-specific fields.
+
+    # Load training config and override request-specific fields. The prompt task
+    # and normalization assets are deliberately independent: a task such as
+    # s2rg/radio is not a dataset/asset identifier.
     config = _config.get_config(args.policy.config)
-    logging.info("Using norm stats for task repo: %s", args.task)
-    config = dataclasses.replace(
-        config, data=dataclasses.replace(config.data, repo_id=args.task, robot_config_name=args.robot)
-    )
+    if args.asset_id is not None and args.repo_id is not None:
+        raise ValueError("--asset-id and --repo-id refer to the same setting; provide only one value")
+    asset_id = args.asset_id or args.repo_id
+    data_config = dataclasses.replace(config.data, robot_config_name=args.robot)
+    if asset_id is not None:
+        data_config = dataclasses.replace(
+            data_config,
+            assets=dataclasses.replace(data_config.assets, asset_id=asset_id),
+        )
+    config = dataclasses.replace(config, data=data_config)
+    resolved_asset_id = asset_id or config.data.assets.asset_id or config.data.repo_id
+    logging.info("Using checkpoint norm stats asset: %s", resolved_asset_id)
 
     policy = _policy_config.create_trained_policy(
         config, args.policy.dir, default_prompt=task_prompt
@@ -69,6 +94,9 @@ def main(args: Args) -> None:
         control_mode=args.control_mode,
         action_horizon=args.action_horizon,
         max_len=config.model.action_horizon,
+        depth_bounds=args.depth_bounds,
+        depth_percentiles=args.depth_percentiles,
+        depth_inverse_clip=args.depth_inverse_clip,
     )
 
     hostname = socket.gethostname()

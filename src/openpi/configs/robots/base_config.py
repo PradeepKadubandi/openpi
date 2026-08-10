@@ -29,6 +29,7 @@ class ObservationConfig:
     obs_key: str            # full name in the obsevation dict during inference
     dataset_key: str        # this is the name of the key in LeRobot datasets
     resolution: List[int]   # [width, height]
+    modality: str = "rgb"   # "rgb" or metric "depth"
 
 
 @dataclass
@@ -62,6 +63,12 @@ class RobotConfig:
                 key: ObservationConfig(**val) if isinstance(val, dict) else val
                 for key, val in self.observations.items()
             }
+            for key, observation in self.observations.items():
+                if observation.modality not in {"rgb", "depth"}:
+                    raise ValueError(
+                        f"Unsupported observation modality {observation.modality!r} "
+                        f"for {key!r}; expected 'rgb' or 'depth'."
+                    )
         
         # Convert action and proprio configs if they're still dicts
         self.proprio = [
@@ -80,4 +87,3 @@ class RobotConfig:
                 f"Sum of action indices ({total_dim}) doesn't match "
                 f"action_dim ({self.action_dim})"
             )
-

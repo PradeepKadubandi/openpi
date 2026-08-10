@@ -175,13 +175,36 @@ After finetuning, you can run evaluation by following these steps:
 
 ```bash
 source .venv/bin/activate
-uv run scripts/serve_b1k.py --robot $ROBOT_TAG --task_name $TASK_TAG policy:checkpoint --policy.config $MODEL_TAG --policy.dir $PATH_TO_CKPT
+uv run scripts/b1k/serve_b1k.py --robot $ROBOT_TAG --task $TASK_TAG --policy.config $MODEL_TAG --policy.dir $PATH_TO_CKPT
 ```
 
 **Example:**
 
 ```bash
-uv run scripts/serve_b1k.py --robot i3l/RealR1Pro --task_name i3l/books policy:checkpoint --policy.config pi0_b1k --policy.dir outputs/checkpoints/pi0_b1k/openpi/49999_books
+uv run scripts/b1k/serve_b1k.py --robot i3l/RealR1Pro --task i3l/books --policy.config pi0_b1k --policy.dir outputs/checkpoints/pi0_b1k/openpi/49999_books
 ```
 
 This opens a policy server listening on `0.0.0.0:8000`. You can then run your robot client to send observations and receive actions.
+
+#### Depth checkpoints
+
+Depth robot configurations mark their camera observations as metric depth. The server converts floating-point `depth_linear`
+frames to three-channel grayscale `uint8` images before normal OpenPI image processing. Already encoded `uint8` depth images are
+passed through without another conversion.
+
+The prompt task and checkpoint normalization asset are separate. For the radio-depth checkpoint, run:
+
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.25 uv run scripts/b1k/serve_b1k.py \
+    --robot s2rg/sim_r1pro_depth \
+    --task s2rg/radio \
+    --repo-id wensi-ai/s2rg_radio_depth_0808 \
+    --policy.config pi05_s2rg_radio_depth \
+    --policy.dir $PATH_TO_DEPTH_CKPT \
+    --port 8000
+```
+
+By default, live metric depth uses per-frame 1st/99th percentiles and the radio dataset's log inverse-depth clipping range
+`1 100`. If dataset-wide metric bounds are available, pass `--depth-bounds MIN_METERS MAX_METERS` for temporally stable scaling.
+For a checkpoint built with different conversion parameters, use `--depth-percentiles LO HI` and
+`--depth-inverse-clip LO HI` to match them.
