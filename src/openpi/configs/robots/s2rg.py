@@ -33,6 +33,30 @@ SimFranka = RobotConfig(
 )
 
 
+SimFrankaDepth = RobotConfig(
+    name="robot",
+    robot_type="Franka",
+    observations={
+        "image_0": ObservationConfig(
+            name="external_depth",
+            obs_key="external::external_camera_1::depth",
+            dataset_key="observation.sim.depth.external_1",
+            resolution=[240, 416]
+        ),
+        "image_1": ObservationConfig(
+            name="wrist_depth",
+            obs_key="robot::robot:camera_link:Camera:0::depth",
+            dataset_key="observation.sim.depth.wrist",
+            resolution=[240, 416]
+        ),
+    },
+    action_key=SimFranka.action_key,
+    action_dim=SimFranka.action_dim,
+    action=SimFranka.action,
+    proprio=SimFranka.proprio,
+)
+
+
 RealFranka = RobotConfig(
     name="robot",
     robot_type="Franka",
@@ -104,6 +128,36 @@ SimR1Pro = RobotConfig(
         StateActionConfig(name="right_arm_qpos", indices=list(range(41, 48))),
         StateActionConfig(name="right_gripper_qpos", indices=list(range(48, 50)), is_eef=True),
     ],
+)
+
+
+SimR1ProDepth = RobotConfig(
+    name="robot",
+    robot_type="R1Pro",
+    observations={
+        "image_0": ObservationConfig(
+            name="head_depth",
+            obs_key="external::zed_camera::depth",
+            dataset_key="observation.sim.depth.head",
+            resolution=[240, 416]
+        ),
+        "image_1": ObservationConfig(
+            name="left_wrist_depth",
+            obs_key="external::left_realsense_camera::depth",
+            dataset_key="observation.sim.depth.left_wrist",
+            resolution=[240, 416]
+        ),
+        "image_2": ObservationConfig(
+            name="right_wrist_depth",
+            obs_key="external::right_realsense_camera::depth",
+            dataset_key="observation.sim.depth.right_wrist",
+            resolution=[240, 416]
+        ),
+    },
+    action_key=SimR1Pro.action_key,
+    action_dim=SimR1Pro.action_dim,
+    action=SimR1Pro.action,
+    proprio=SimR1Pro.proprio,
 )
 
 
@@ -196,7 +250,9 @@ RealR1Pro = RobotConfig(
 
 # Register robots in the global registry
 register_robot("s2rg/sim_franka", SimFranka)
+register_robot("s2rg/sim_franka_depth", SimFrankaDepth)
 register_robot("s2rg/real_franka", RealFranka)
 register_robot("s2rg/sim_r1pro", SimR1Pro)
+register_robot("s2rg/sim_r1pro_depth", SimR1ProDepth)
 register_robot("s2rg/s2rg_r1pro", S2rgR1Pro)
 register_robot("s2rg/real_r1pro", RealR1Pro)
