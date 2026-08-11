@@ -255,6 +255,39 @@ RealR1Pro = RobotConfig(
 )
 
 
+RealR1ProDepth = RobotConfig(
+    name="robot",
+    robot_type="RealR1Pro",
+    observations={
+        "image_0": ObservationConfig(
+            name="head_depth",
+            obs_key="external::zed_camera::depth_linear",
+            dataset_key="observation.sim.depth.head",
+            resolution=[240, 416],
+            modality="depth",
+        ),
+        "image_1": ObservationConfig(
+            name="left_wrist_depth",
+            obs_key="external::left_realsense_camera::depth_linear",
+            dataset_key="observation.sim.depth.left_wrist",
+            resolution=[240, 416],
+            modality="depth",
+        ),
+        "image_2": ObservationConfig(
+            name="right_wrist_depth",
+            obs_key="external::right_realsense_camera::depth_linear",
+            dataset_key="observation.sim.depth.right_wrist",
+            resolution=[240, 416],
+            modality="depth",
+        ),
+    },
+    action_key=RealR1Pro.action_key,
+    action_dim=RealR1Pro.action_dim,
+    action=RealR1Pro.action,
+    proprio=RealR1Pro.proprio,
+)
+
+
 # Register robots in the global registry
 register_robot("s2rg/sim_franka", SimFranka)
 register_robot("s2rg/sim_franka_depth", SimFrankaDepth)
@@ -263,3 +296,4 @@ register_robot("s2rg/sim_r1pro", SimR1Pro)
 register_robot("s2rg/sim_r1pro_depth", SimR1ProDepth)
 register_robot("s2rg/s2rg_r1pro", S2rgR1Pro)
 register_robot("s2rg/real_r1pro", RealR1Pro)
+register_robot("s2rg/real_r1pro_depth", RealR1ProDepth)

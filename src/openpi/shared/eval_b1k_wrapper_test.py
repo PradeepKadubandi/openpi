@@ -94,6 +94,39 @@ def test_depth_wrapper_preserves_preprocessed_uint8_depth() -> None:
         np.testing.assert_array_equal(image[..., 0], gray)
 
 
+def test_real_r1pro_depth_wrapper_uses_depth_images_and_real_proprio_indices() -> None:
+    wrapper = B1KPolicyWrapper(
+        policy=_FakePolicy(),
+        robot="s2rg/real_r1pro_depth",
+        text_prompt="Pick up the radio on the table.",
+        control_mode="receding_horizon",
+        action_horizon=8,
+        max_len=32,
+        obs_size=(4, 5),
+    )
+    gray = np.arange(20, dtype=np.uint8).reshape(4, 5)
+    proprio = np.arange(23, dtype=np.float32)
+    obs = {
+        "robot::proprio": proprio,
+        "external::zed_camera::depth_linear": gray,
+        "external::left_realsense_camera::depth_linear": gray,
+        "external::right_realsense_camera::depth_linear": gray,
+    }
+
+    processed = wrapper.process_input(obs)
+    model_input = B1KInputs(robot_config=wrapper.robot, model_type=ModelType.PI05)(processed[0])
+
+    assert model_input["state"].shape == (20,)
+    np.testing.assert_array_equal(
+        model_input["state"],
+        np.concatenate((proprio[3:14], proprio[14:15], proprio[15:22], proprio[22:23])),
+    )
+    for camera_id in range(3):
+        image = processed[0][f"observation/image_{camera_id}"]
+        assert image.shape == (4, 5, 3)
+        np.testing.assert_array_equal(image[..., 0], gray)
+
+
 def test_depth_wrapper_supports_batched_channel_less_depth() -> None:
     wrapper = B1KPolicyWrapper(
         policy=_FakePolicy(),
