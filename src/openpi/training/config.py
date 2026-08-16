@@ -801,21 +801,18 @@ _CONFIGS = [
         name="pi05_i3l_sim",
         model=pi0_config.Pi0Config(action_horizon=30, pi05=True),
         data=LeRobotB1KDataConfig(
-            repo_id=["wensi-ai/open-radio-base-demo-0-200", "wensi-ai/open-radio-base-int-1-100", "wensi-ai/open-radio-sirius-int-2-25", "wensi-ai/open-radio-sirius-int-3-25", "wensi-ai/open-radio-sirius-int-4-25"],
+            repo_id=["wensi-ai/open-radio-base-demo-0-200", "wensi-ai/open-radio-base-int-1-100"],
             base_config=DataConfig(
                 data_cls=I3LLeRobotDataset,
                 dataset_root="/scr/wsai/lerobot",
                 prompt_from_task=True,
                 dataset_kwargs={
                     "episodes": {
-                        "wensi-ai/open-radio-base-demo-0-200": list(range(50)),
+                        "wensi-ai/open-radio-base-demo-0-200": list(range(100)),
                         "wensi-ai/open-radio-base-int-1-100": list(range(25)),
-                        "wensi-ai/open-radio-sirius-int-2-25": list(range(25)),
-                        "wensi-ai/open-radio-sirius-int-3-25": list(range(25)),
-                        "wensi-ai/open-radio-sirius-int-4-25": list(range(25)),
                     },
                     "sampling_mode": True,
-                    "reweight_strategy": "sirius",
+                    "reweight_strategy": "cotrain",
                 },   
             ),
             robot_config_name="i3l/SimR1Pro",
