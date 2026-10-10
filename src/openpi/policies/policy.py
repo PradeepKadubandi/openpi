@@ -17,6 +17,7 @@ from openpi import transforms as _transforms
 from openpi.models import model as _model
 from openpi.shared import array_typing as at
 from openpi.shared import nnx_utils
+from openpi.shared.performance import measured
 
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
@@ -65,18 +66,12 @@ class Policy(BasePolicy):
             self._rng = rng or jax.random.key(0)
 
     @override
+    @measured("policy.infer_to_host_action")
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
-        inputs = self._input_transform(inputs)
-        if not self._is_pytorch_model:
-            # Make a batch and convert to jax.Array.
-            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
-            self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
-        else:
-            # Convert inputs to PyTorch tensors and move to correct device
-            inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)
-            sample_rng_or_pytorch_device = self._pytorch_device
+        inputs = self._performance_input_transform(inputs)
+        inputs, sample_rng_or_pytorch_device = self._performance_prepare_inputs(inputs)
 
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
@@ -91,19 +86,46 @@ class Policy(BasePolicy):
         start_time = time.monotonic()
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": self._performance_sample(sample_rng_or_pytorch_device, observation, **sample_kwargs),
         }
         model_time = time.monotonic() - start_time
-        if self._is_pytorch_model:
-            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
-        else:
-            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
-
-        outputs = self._output_transform(outputs)
+        outputs = self._performance_materialize(outputs)
+        outputs = self._performance_output_transform(outputs)
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
         }
         return outputs
+
+    @measured("policy.device_preparation")
+    def _performance_prepare_inputs(self, inputs):
+        if not self._is_pytorch_model:
+            # Make a batch and convert to jax.Array.
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+            self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
+        else:
+            # Convert inputs to PyTorch tensors and move to correct device
+            inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)
+            sample_rng_or_pytorch_device = self._pytorch_device
+
+        return inputs, sample_rng_or_pytorch_device
+
+    @measured("policy.input_transforms")
+    def _performance_input_transform(self, inputs):
+        return self._input_transform(inputs)
+
+    @measured("policy.model_dispatch")
+    def _performance_sample(self, *args, **kwargs):
+        return self._sample_actions(*args, **kwargs)
+
+    @measured("policy.materialize_host_action")
+    def _performance_materialize(self, outputs):
+        if self._is_pytorch_model:
+            return jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
+        return jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+
+    @measured("policy.output_transforms")
+    def _performance_output_transform(self, outputs):
+        return self._output_transform(outputs)
 
     @property
     def metadata(self) -> dict[str, Any]:

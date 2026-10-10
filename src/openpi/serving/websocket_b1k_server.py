@@ -1,16 +1,23 @@
 import asyncio
+from copy import deepcopy
 import functools
 import http
 import logging
-import msgpack
-import numpy as np
+import os
+from pathlib import Path
 import time
 import traceback
-import torch
-import websockets.asyncio.server as _server
-import websockets
-from copy import deepcopy
 from typing import Any, Optional
+
+import msgpack
+import numpy as np
+import torch
+import websockets
+import websockets.asyncio.server as _server
+
+from openpi.shared.performance import KEY
+from openpi.shared.performance import Capture
+from openpi.shared.performance import measured
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -35,7 +42,11 @@ class WebsocketPolicyServer:
         self._policy = policy
         self._host = host
         self._port = port
-        self._metadata = metadata or {}
+        self._metadata = dict(metadata or {})
+        cycle = self._policy.action_horizon if self._policy.control_mode == "receding_horizon" else 1
+        self._metadata[KEY] = {"version": 1, "cycle_length": cycle}
+        self.performance = None
+        self._captured_requests = 0
 
     def serve_forever(self) -> None:
         asyncio.run(self.run())
@@ -52,55 +63,144 @@ class WebsocketPolicyServer:
         ) as server:
             await server.serve_forever()
 
+    @measured("server.decode")
+    def _decode(self, raw):
+        return unpackb(raw, strict_map_key=False)
+
+    @measured("server.observation_copy")
+    def _copy(self, obs):
+        return deepcopy(obs)
+
+    @measured("server.policy_act")
+    def _act(self, obs):
+        return self._policy.act(obs)
+
+    @measured("server.pack")
+    def _pack(self, packer, response):
+        return packer.pack(response)
+
+    @measured("server.action_to_numpy")
+    def _action_to_numpy(self, action):
+        return action.cpu().numpy()
+
+    def _start_capture(self, session):
+        if not isinstance(session, str) or len(session) != 32 or any(c not in "0123456789abcdef" for c in session):
+            raise ValueError("Invalid performance session")
+        if self.performance is not None and not self.performance.done:
+            self.performance.finish()
+        base_policy = getattr(self._policy.policy, "_policy", self._policy.policy)
+        backend = "torch" if getattr(base_policy, "_is_pytorch_model", False) else "jax"
+        directory = Path(os.environ.get("B1K_PERFORMANCE_DIR", "performance")) / session
+        self.performance = Capture(
+            directory,
+            backend=backend,
+            session=session,
+            metadata={"control_mode": self._policy.control_mode, "horizon": self._policy.action_horizon},
+        )
+        self._policy.performance = self.performance
+        self._policy.policy.performance = self.performance
+        base_policy.performance = self.performance
+        self._captured_requests = 0
+        self.performance.start()
+        return {"session": session, "directory": str(directory), "backend": backend}
+
     async def _handler(self, websocket):
         logger.info(f"Connection from {websocket.remote_address} opened")
         packer = Packer()
 
         await websocket.send(packer.pack(self._metadata))
 
-        prev_total_time = None
-        while True:
-            try:
-                start_time = time.monotonic()
-                result = unpackb(await websocket.recv(), strict_map_key=False)
-                if "reset" in result:
-                    self._policy.reset()
-                    continue
-
-                obs = deepcopy(result)
-
-                infer_time = time.monotonic()
-                action = self._policy.act(obs)
-                infer_time = time.monotonic() - infer_time
-
-                action = {
-                    "action": action.cpu().numpy(),
-                }
-                action["server_timing"] = {
-                    "infer_ms": infer_time * 1000,
-                }
-                if prev_total_time is not None:
-                    # We can only record the last total time since we also want to include the send time.
-                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
-
-                await websocket.send(packer.pack(action))
-                prev_total_time = time.monotonic() - start_time
-
-            except websockets.ConnectionClosed:
-                logger.info(f"Connection from {websocket.remote_address} closed")
-                break
-            except Exception:
-                logger.error(f"Error in connection from {websocket.remote_address}:\n{traceback.format_exc()}")
+        try:
+            prev_total_time = None
+            while True:
                 try:
-                    # Try new websockets API first
-                    await websocket.close(
-                        code=websockets.frames.CloseCode.INTERNAL_ERROR,
-                        reason="Internal server error. Traceback included in previous frame.",
-                    )
-                except AttributeError:
-                    # Fallback for older websockets versions
-                    await websocket.close(code=1011, reason="Internal server error")
-                raise
+                    start_time = time.monotonic()
+                    raw = await websocket.recv()
+                    # Decode belongs to this request; the step ID is known only after unpacking.
+                    record_start = len(self.performance.records) if self.performance and self.performance.active else 0
+                    result = self._decode(raw)
+                    profile_request = result.pop(KEY, None)
+                    if profile_request and "command" in profile_request:
+                        session = profile_request["session"]
+                        if self.performance is not None and self.performance.active:
+                            # Control traffic is not a sampled action request.
+                            del self.performance.records[record_start:]
+                        if profile_request["command"] == "start":
+                            reply = self._start_capture(session)
+                        elif profile_request["command"] == "stop":
+                            if self.performance is not None and self.performance.session == session:
+                                self.performance.finish(
+                                    complete=self._captured_requests == self._metadata[KEY]["cycle_length"]
+                                )
+                            reply = {"session": session}
+                        else:
+                            raise ValueError("Unknown profiling command")
+                        await websocket.send(packer.pack({KEY: reply}))
+                        continue
+                    if self.performance is not None and self.performance.active:
+                        if (
+                            profile_request
+                            and profile_request.get("session") == self.performance.session
+                            and self._captured_requests < self._metadata[KEY]["cycle_length"]
+                        ):
+                            self._captured_requests += 1
+                            self.performance.step = profile_request["step"]
+                            for record in self.performance.records[record_start:]:
+                                record["step"] = self.performance.step
+                        else:
+                            self.performance.finish()
+
+                    if "reset" in result:
+                        self._policy.reset()
+                        continue
+
+                    obs = self._copy(result)
+
+                    infer_time = time.monotonic()
+                    action = self._act(obs)
+                    infer_time = time.monotonic() - infer_time
+
+                    action = {
+                        "action": self._action_to_numpy(action),
+                    }
+                    action["server_timing"] = {
+                        "infer_ms": infer_time * 1000,
+                    }
+                    if prev_total_time is not None:
+                        # We can only record the last total time since we also want to include the send time.
+                        action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+
+                    if self.performance is not None and self.performance.active:
+                        action[KEY] = {
+                            "session": self.performance.session,
+                            "step": self.performance.step,
+                            "inference": self._policy.performance_inference,
+                        }
+                        payload = self._pack(packer, action)
+                        with self.performance.span("server.send"):
+                            await websocket.send(payload)
+                    else:
+                        await websocket.send(packer.pack(action))
+                    prev_total_time = time.monotonic() - start_time
+
+                except websockets.ConnectionClosed:
+                    logger.info(f"Connection from {websocket.remote_address} closed")
+                    break
+                except Exception:
+                    logger.error(f"Error in connection from {websocket.remote_address}:\n{traceback.format_exc()}")
+                    try:
+                        # Try new websockets API first
+                        await websocket.close(
+                            code=websockets.frames.CloseCode.INTERNAL_ERROR,
+                            reason="Internal server error. Traceback included in previous frame.",
+                        )
+                    except AttributeError:
+                        # Fallback for older websockets versions
+                        await websocket.close(code=1011, reason="Internal server error")
+                    raise
+        finally:
+            if self.performance is not None:
+                self.performance.finish()
 
 
 def _health_check(connection, request) -> Optional[Any]:

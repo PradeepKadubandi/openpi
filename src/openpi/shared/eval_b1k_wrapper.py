@@ -1,8 +1,10 @@
 import numpy as np
-import torch
 from openpi_client.base_policy import BasePolicy
 from openpi_client.image_tools import resize_with_pad
+import torch
+
 from openpi.configs.robots import ROBOT_REGISTRY
+from openpi.shared.performance import measured
 
 
 class B1KPolicyWrapper:
@@ -65,6 +67,7 @@ class B1KPolicyWrapper:
 
             self.step_counter = np.zeros(batch_size, dtype=np.int32)
 
+    @measured("policy.image_preprocessing")
     def process_input(self, obs: dict) -> dict:
         """
         Process the input dictionary to match the expected input format for the model.
@@ -130,6 +133,12 @@ class B1KPolicyWrapper:
                 (self.step_counter % self.action_horizon) == 0
             )
 
+        if getattr(self, "performance", None) is not None and self.performance.active:
+            self.performance_inference = bool(needs_inference.any())
+            self.performance.records.append(
+                {"step": self.performance.step, "name": "inference_batch",
+                 "batch_size": int(needs_inference.sum()), "duration_ns": 0}
+            )
         if needs_inference.any():
             indices_needing_inference = np.where(needs_inference)[0]
             # Create sub-batch for elements that need inference
@@ -149,6 +158,10 @@ class B1KPolicyWrapper:
             self.sequence_lengths[indices_needing_inference, 0] = seq_len
             self.sequence_indices[indices_needing_inference, 0] = 0
 
+        return self._select_receding_action(batch_size, batched)
+
+    @measured("policy.buffered_action_selection")
+    def _select_receding_action(self, batch_size, batched):
         # Extract next action for each batch element (fully vectorized!)
         batch_range = np.arange(batch_size)
         current_indices = self.sequence_indices[batch_range, 0]
@@ -355,6 +368,8 @@ class B1KPolicyWrapper:
 
     def act(self, input_obs):
         """Dispatch to the appropriate action method based on control mode."""
+        if getattr(self, "performance", None) is not None and self.performance.active:
+            self.performance_inference = True
         if self.control_mode == "receding_temporal":
             return self.act_receding_temporal(input_obs)
         elif self.control_mode == "receding_horizon":
